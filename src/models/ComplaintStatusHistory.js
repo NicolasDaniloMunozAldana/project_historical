@@ -41,6 +41,11 @@ const ComplaintStatusHistory = sequelize.define(
       allowNull: true,
       comment: 'Descripción del cambio',
     },
+    correlation_id: {
+      type: DataTypes.STRING(36),
+      allowNull: true,
+      comment: 'UUID para trazabilidad entre microservicios',
+    },
     event_timestamp: {
       type: DataTypes.DATE,
       allowNull: false,
@@ -69,6 +74,10 @@ const ComplaintStatusHistory = sequelize.define(
       {
         name: 'idx_new_status',
         fields: ['new_status'],
+      },
+      {
+        name: 'idx_correlation_id',
+        fields: ['correlation_id'],
       },
     ],
   }

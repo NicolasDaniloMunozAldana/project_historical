@@ -136,12 +136,39 @@ services:
 
 ## Logs
 
-El servicio genera logs para:
+El servicio implementa logging estructurado con Winston y trazabilidad mediante Correlation IDs:
 
-- ✅ `[OK]` Conexión exitosa a Kafka
-- ✅ `[OK]` Eventos procesados correctamente
-- ⚠️ `[WARN]` Advertencias de configuración
-- ❌ `[ERROR]` Errores en el procesamiento
+### Sistema de Logging
+
+- **Logs estructurados en formato JSON** con rotación diaria
+- **Correlation IDs** para trazabilidad end-to-end entre microservicios
+- **Archivos de log:**
+  - `logs/application-YYYY-MM-DD.log` - Logs generales (retención: 14 días)
+  - `logs/error-YYYY-MM-DD.log` - Solo errores (retención: 30 días)
+
+### Eventos Logueados
+
+- ✅ Conexión exitosa a Kafka
+- ✅ Eventos consumidos de Kafka con correlation ID
+- ✅ Operaciones de base de datos (INSERT)
+- ✅ Eventos de negocio (EVENT_CONSUMED, EVENT_SAVED_SUCCESS)
+- ⚠️ Advertencias de configuración
+- ❌ Errores en el procesamiento con contexto completo
+
+### Trazabilidad
+
+Todos los eventos incluyen `correlation_id` que permite rastrear una operación desde `project_complaints` hasta este consumer:
+
+```bash
+# Buscar logs por correlation ID
+grep "correlation-id-aqui" logs/application-*.log
+
+# Ver en base de datos
+SELECT * FROM historical.complaint_status_history 
+WHERE correlation_id = 'correlation-id-aqui';
+```
+
+Ver documentación completa: [LOGGING_VERIFICATION_GUIDE.md](../LOGGING_VERIFICATION_GUIDE.md)
 
 ## Notas Importantes
 
