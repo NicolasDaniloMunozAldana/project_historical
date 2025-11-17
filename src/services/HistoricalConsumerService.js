@@ -6,6 +6,13 @@
 const { Kafka } = require('kafkajs');
 const kafkaConfig = require('../config/kafkaConfig');
 const ComplaintStatusHistory = require('../models/ComplaintStatusHistory');
+const { 
+  logKafkaEvent, 
+  logBusinessEvent, 
+  logDatabaseOperation, 
+  logError,
+  logger 
+} = require('../utils/logger');
 
 class HistoricalConsumerService {
   constructor() {
@@ -20,7 +27,7 @@ class HistoricalConsumerService {
    */
   async initialize() {
     if (!kafkaConfig.enabled) {
-      console.log('[WARN] Kafka is disabled');
+      logger.warn('Kafka is disabled');
       return;
     }
 
@@ -41,7 +48,11 @@ class HistoricalConsumerService {
       this.consumer = this.kafka.consumer(kafkaConfig.consumer);
       await this.consumer.connect();
       this.isConnected = true;
-      console.log('[OK] Kafka Consumer connected successfully');
+      logger.info('Kafka Consumer connected successfully', {
+        service: 'historical-service',
+        clientId: kafkaConfig.clientId,
+        brokers: kafkaConfig.brokers
+      });
 
       // Subscribe to complaint status events topic
       // fromBeginning: true ensures we capture all historical events
@@ -50,11 +61,16 @@ class HistoricalConsumerService {
         fromBeginning: kafkaConfig.fromBeginning,
       });
 
-      console.log(
-        `[OK] Subscribed to topic: ${kafkaConfig.topic} (fromBeginning: ${kafkaConfig.fromBeginning})`
-      );
+      logger.info('Subscribed to Kafka topic', {
+        service: 'historical-service',
+        topic: kafkaConfig.topic,
+        fromBeginning: kafkaConfig.fromBeginning
+      });
     } catch (error) {
-      console.error('[ERROR] Failed to connect Kafka Consumer:', error.message);
+      logError(error, {
+        operation: 'initialize',
+        service: 'historical-service'
+      });
       this.isConnected = false;
       throw error;
     }
@@ -74,12 +90,18 @@ class HistoricalConsumerService {
         autoCommit: kafkaConfig.autoCommit,
         autoCommitInterval: kafkaConfig.autoCommitInterval,
         eachMessage: async ({ topic, partition, message }) => {
-          await this.handleMessage(message, partition);
+          await this.handleMessage(message, partition, topic);
         },
       });
-      console.log('[OK] Historical consumer started and listening for events');
+      logger.info('Historical consumer started and listening for events', {
+        service: 'historical-service',
+        topic: kafkaConfig.topic
+      });
     } catch (error) {
-      console.error('[ERROR] Error in consumer loop:', error.message);
+      logError(error, {
+        operation: 'startConsuming',
+        service: 'historical-service'
+      });
       throw error;
     }
   }
@@ -88,15 +110,27 @@ class HistoricalConsumerService {
    * Handle incoming status change event
    * @param {Object} message - Kafka message
    * @param {number} partition - Partition number
+   * @param {string} topic - Kafka topic
    * @returns {Promise<void>}
    */
-  async handleMessage(message, partition) {
+  async handleMessage(message, partition, topic) {
     const startTime = Date.now();
     let eventData = null;
+    let correlationId = null;
 
     try {
+      // Extract correlation ID from headers
+      if (message.headers && message.headers['x-correlation-id']) {
+        correlationId = message.headers['x-correlation-id'].toString();
+      }
+
       // Parse event data
       eventData = JSON.parse(message.value.toString());
+
+      // If no correlation ID in headers, try to get it from event data
+      if (!correlationId && eventData.correlationId) {
+        correlationId = eventData.correlationId;
+      }
 
       // Extract headers
       const headers = {};
@@ -106,33 +140,68 @@ class HistoricalConsumerService {
         });
       }
 
-      console.log(
-        `[OK] Processing status change event for complaint ${eventData.id_complaint} (partition: ${partition})`
+      logKafkaEvent(
+        'CONSUMED',
+        topic,
+        {
+          partition,
+          offset: message.offset,
+          complaintId: eventData.id_complaint,
+          eventType: 'Cambio de estado de queja recibido desde Kafka'
+        },
+        correlationId
+      );
+
+      logBusinessEvent(
+        'EVENTO_CONSUMIDO_KAFKA',
+        {
+          topic,
+          partition,
+          offset: message.offset,
+          complaintId: eventData.id_complaint,
+          previousStatus: eventData.previous_status,
+          newStatus: eventData.new_status,
+          description: `Queja #${eventData.id_complaint} cambió de estado: ${eventData.previous_status || 'ninguno'} → ${eventData.new_status}`
+        },
+        correlationId,
+        'historical-service'
       );
 
       // Validate event data
-      if (!this.validateEventData(eventData)) {
+      if (!this.validateEventData(eventData, correlationId)) {
         throw new Error('Invalid event data structure');
       }
 
       // Save event to historical database
-      await this.saveEventToDatabase(eventData);
+      await this.saveEventToDatabase(eventData, correlationId);
 
       const processingTime = Date.now() - startTime;
-      console.log(
-        `[OK] Event saved successfully: complaint ${eventData.id_complaint} - ${eventData.previous_status || 'N/A'} → ${eventData.new_status} (${processingTime}ms)`
+      logBusinessEvent(
+        'EVENTO_GUARDADO_EXITOSO',
+        {
+          complaintId: eventData.id_complaint,
+          previousStatus: eventData.previous_status || 'N/A',
+          newStatus: eventData.new_status,
+          processingTimeMs: processingTime,
+          description: `Historial guardado exitosamente para queja #${eventData.id_complaint}. Tiempo de procesamiento: ${processingTime}ms`
+        },
+        correlationId,
+        'historical-service'
       );
     } catch (error) {
       const processingTime = Date.now() - startTime;
-      console.error(
-        `[ERROR] Error processing event (${processingTime}ms):`,
-        error.message
-      );
-
-      // Log failed event for manual review
-      if (eventData) {
-        console.error('[ERROR] Failed event data:', JSON.stringify(eventData));
-      }
+      logError(error, {
+        operation: 'handleMessage',
+        service: 'historical-service',
+        topic,
+        partition,
+        offset: message.offset,
+        processingTimeMs: processingTime,
+        eventData: eventData ? {
+          id_complaint: eventData.id_complaint,
+          new_status: eventData.new_status
+        } : null
+      }, correlationId);
 
       // Don't throw error to avoid blocking the consumer
       // In production, you might want to send this to a DLQ
@@ -142,27 +211,44 @@ class HistoricalConsumerService {
   /**
    * Validate event data structure
    * @param {Object} eventData - Event data
+   * @param {string} correlationId - Correlation ID for logging
    * @returns {boolean} True if valid
    */
-  validateEventData(eventData) {
+  validateEventData(eventData, correlationId = null) {
     if (!eventData) {
-      console.error('[ERROR] Event data is null or undefined');
+      logError(new Error('Event data is null or undefined'), {
+        operation: 'validateEventData',
+        service: 'historical-service'
+      }, correlationId);
       return false;
     }
 
     if (!eventData.id_complaint) {
-      console.error('[ERROR] Missing id_complaint in event data');
+      logError(new Error('Missing id_complaint in event data'), {
+        operation: 'validateEventData',
+        service: 'historical-service',
+        eventData
+      }, correlationId);
       return false;
     }
 
     if (!eventData.new_status) {
-      console.error('[ERROR] Missing new_status in event data');
+      logError(new Error('Missing new_status in event data'), {
+        operation: 'validateEventData',
+        service: 'historical-service',
+        complaintId: eventData.id_complaint
+      }, correlationId);
       return false;
     }
 
     const validStatuses = ['abierta', 'en_revision', 'cerrada'];
     if (!validStatuses.includes(eventData.new_status)) {
-      console.error(`[ERROR] Invalid new_status: ${eventData.new_status}`);
+      logError(new Error(`Invalid new_status: ${eventData.new_status}`), {
+        operation: 'validateEventData',
+        service: 'historical-service',
+        complaintId: eventData.id_complaint,
+        invalidStatus: eventData.new_status
+      }, correlationId);
       return false;
     }
 
@@ -170,9 +256,12 @@ class HistoricalConsumerService {
       eventData.previous_status &&
       !validStatuses.includes(eventData.previous_status)
     ) {
-      console.error(
-        `[ERROR] Invalid previous_status: ${eventData.previous_status}`
-      );
+      logError(new Error(`Invalid previous_status: ${eventData.previous_status}`), {
+        operation: 'validateEventData',
+        service: 'historical-service',
+        complaintId: eventData.id_complaint,
+        invalidStatus: eventData.previous_status
+      }, correlationId);
       return false;
     }
 
@@ -182,23 +271,52 @@ class HistoricalConsumerService {
   /**
    * Save event to historical database
    * @param {Object} eventData - Event data
+   * @param {string} correlationId - Correlation ID for logging
    * @returns {Promise<void>}
    */
-  async saveEventToDatabase(eventData) {
+  async saveEventToDatabase(eventData, correlationId = null) {
     try {
-      await ComplaintStatusHistory.create({
+      logDatabaseOperation(
+        'INSERT',
+        'historical.complaint_status_history',
+        {
+          complaintId: eventData.id_complaint,
+          previousStatus: eventData.previous_status,
+          newStatus: eventData.new_status,
+          description: `Insertando registro de historial: Queja #${eventData.id_complaint} - Estado: ${eventData.previous_status || 'nuevo'} → ${eventData.new_status}`
+        },
+        correlationId
+      );
+
+      const historyRecord = await ComplaintStatusHistory.create({
         id_complaint: eventData.id_complaint,
         previous_status: eventData.previous_status || null,
         new_status: eventData.new_status,
         changed_by: eventData.changed_by || 'system',
         change_description: eventData.change_description || null,
+        correlation_id: correlationId,
         event_timestamp: eventData.event_timestamp
           ? new Date(eventData.event_timestamp)
           : new Date(),
         created_at: new Date(),
       });
+
+      logDatabaseOperation(
+        'INSERT_SUCCESS',
+        'historical.complaint_status_history',
+        {
+          historyId: historyRecord.id_history,
+          complaintId: eventData.id_complaint,
+          description: `Registro de historial #${historyRecord.id_history} creado exitosamente para queja #${eventData.id_complaint}`
+        },
+        correlationId
+      );
     } catch (error) {
-      console.error('[ERROR] Error saving to database:', error.message);
+      logError(error, {
+        operation: 'saveEventToDatabase',
+        service: 'historical-service',
+        complaintId: eventData.id_complaint
+      }, correlationId);
       throw error;
     }
   }
@@ -212,12 +330,14 @@ class HistoricalConsumerService {
       try {
         await this.consumer.disconnect();
         this.isConnected = false;
-        console.log('[OK] Kafka Consumer disconnected');
+        logger.info('Kafka Consumer disconnected', {
+          service: 'historical-service'
+        });
       } catch (error) {
-        console.error(
-          '[ERROR] Error disconnecting Kafka Consumer:',
-          error.message
-        );
+        logError(error, {
+          operation: 'disconnect',
+          service: 'historical-service'
+        });
         throw error;
       }
     }
