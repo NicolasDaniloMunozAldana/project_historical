@@ -1,178 +1,131 @@
-# Historical Event Sourcing Service
+# Project Historical - Event Sourcing Service
 
-Este servicio consume eventos de cambios de estado de quejas desde Kafka y los almacena en una tabla histórica para Event Sourcing.
+This project is a Kafka consumer service for historical tracking of complaint status changes, implementing Event Sourcing patterns for immutable audit trails and complete state reconstruction.
 
-## Descripción
+**Current Version:** 1.0.0
 
-El servicio `project_historical` es un consumidor de Kafka que:
+## Main Features
 
-- Escucha eventos de cambios de estado de quejas desde el topic `complaint-status-events`
-- Almacena cada evento en la tabla `historical.complaint_status_history`
-- Permite recorrer el historial completo desde el inicio (`fromBeginning: true`)
-- Mantiene un registro inmutable de todos los cambios de estado
+- **Event Sourcing**: Complete, immutable history of all complaint status changes
+- **Kafka Consumer**: Consumes events from `complaint-status-events` topic
+- **Historical Database**: Stores events in `historical.complaint_status_history` table
+- **Event Replay**: Reads from beginning of topic for complete historical reconstruction
+- **Correlation ID Tracking**: End-to-end traceability across microservices
+- **Structured Logging**: Winston with daily log rotation and JSON formatting
+- **Auto-commit**: Automatic offset management with configurable intervals
+- **Testing**: Comprehensive test suite with 44 tests using Jest
+- **Retry Policy**: Configurable retry mechanism for failed operations
 
-## Requisitos
+## Event Sourcing Architecture
 
-- Node.js 18+
-- MySQL 8.0+
-- Kafka (disponible en el mismo broker que `project_email_sender`)
-- Acceso a la base de datos con el schema `historical` creado
+The project implements **Event Sourcing** to maintain a complete, immutable history of all complaint status changes. Every time a complaint's status changes in the main application, an event is published to Kafka and consumed by this service.
 
-## Instalación
+### Architecture Components
+
+- **Producer**: `project_complaints` publishes status change events to Kafka
+- **Topic**: `complaint-status-events` with infinite retention and compact cleanup policy
+- **Consumer**: This service (`project_historical`) consumes and stores events
+- **Database**: `historical.complaint_status_history` table stores the immutable event log
+- **Replay**: Consumer can replay all events from the beginning (`fromBeginning: true`)
+
+### Event Structure
+
+Each event includes:
+- `id_complaint`: Complaint ID
+- `previous_status`: Previous status (abierta, en_revision, cerrada)
+- `new_status`: New status
+- `changed_by`: User who made the change
+- `change_description`: Optional description of the change
+- `event_timestamp`: When the event occurred
+- `correlation_id`: Unique identifier for end-to-end tracing
+- `created_at`: When the event was stored in the database
+
+### Benefits
+
+- **Complete audit trail**: Know exactly when and by whom each status change was made
+- **Historical reconstruction**: Rebuild the state of any complaint at any point in time
+- **Temporal queries**: Analyze how long complaints stayed in each status
+- **Event replay**: Recover from failures by replaying all events
+- **Immutable log**: Events are never modified or deleted
+- **Decoupling**: Main application continues working even if historical service is down
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed documentation.
+
+## Logging and Traceability
+
+This service implements comprehensive logging with end-to-end traceability using **Correlation IDs** and **Winston**. Each request is tracked from the frontend through multiple microservices.
+
+### Documentation
+
+- **[LOGGING_TRACEABILITY.md](./LOGGING_TRACEABILITY.md)** - Complete logging and traceability guide
+- **[IMPLEMENTATION_SUMMARY.md](./IMPLEMENTATION_SUMMARY.md)** - Implementation summary and setup guide
+
+### Key Features
+
+- **Correlation IDs**: Unique identifiers propagated through Kafka headers and payload
+- **Structured Logging**: JSON logs with context, timestamps, and correlation IDs
+- **Auto-rotation**: Daily log files with automatic cleanup (14 days for info, 30 days for errors)
+- **Event Tracking**: Logs for Kafka consumption, database operations, and event sourcing
+- **Error Handling**: Comprehensive error logging without blocking the consumer
+
+### Log Levels
+
+- `info`: General operations (connection, event processing, database operations)
+- `error`: Errors with full context and stack traces
+- Logs are stored in `logs/application-YYYY-MM-DD.log` and `logs/error-YYYY-MM-DD.log`
+
+### Searching Logs
 
 ```bash
-npm install
+# Search by correlation ID
+grep "abc-123-def-456" logs/application-*.log
+
+# Parse JSON logs
+grep "abc-123-def-456" logs/application-*.log | jq '.'
+
+# Search in database
+SELECT * FROM historical.complaint_status_history 
+WHERE correlation_id = 'abc-123-def-456';
 ```
 
-## Configuración
-
-Crear archivo `.env` con las siguientes variables:
-
-```env
-# Database Configuration
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=root
-DB_NAME=complaints_db
-DB_DIALECT=mysql
-
-# Kafka Configuration
-KAFKA_ENABLED=true
-KAFKA_BROKERS=localhost:9092
-KAFKA_CLIENT_ID=historical-service
-KAFKA_GROUP_ID=historical-consumer-group
-KAFKA_TOPIC_COMPLAINT_STATUS_EVENTS=complaint-status-events
-
-# Connection Settings
-KAFKA_CONNECTION_TIMEOUT=10000
-KAFKA_REQUEST_TIMEOUT=30000
-KAFKA_SESSION_TIMEOUT=30000
-KAFKA_REBALANCE_TIMEOUT=60000
-KAFKA_HEARTBEAT_INTERVAL=3000
-
-# Consumer Settings
-KAFKA_FROM_BEGINNING=true
-KAFKA_AUTO_COMMIT=true
-KAFKA_AUTO_COMMIT_INTERVAL=5000
-
-# Retry Policy
-KAFKA_MAX_RETRIES=3
-KAFKA_INITIAL_RETRY_TIME=100
-KAFKA_MAX_RETRY_TIME=30000
-KAFKA_RETRY_MULTIPLIER=2
-
-# Logging
-LOG_LEVEL=info
-```
-
-## Uso
-
-### Modo Producción
-
-```bash
-npm start
-```
-
-### Modo Desarrollo
-
-```bash
-npm run dev
-```
-
-## Arquitectura
-
-### Event Sourcing
-
-El servicio implementa Event Sourcing almacenando cada cambio de estado como un evento inmutable:
-
-- **id_history**: Identificador único del evento
-- **id_complaint**: ID de la queja relacionada
-- **previous_status**: Estado anterior de la queja
-- **new_status**: Nuevo estado de la queja
-- **changed_by**: Usuario que realizó el cambio
-- **change_description**: Descripción del cambio
-- **event_timestamp**: Fecha y hora del evento
-- **created_at**: Fecha de registro en la BD
-
-### Consumo de Eventos
-
-El consumidor Kafka está configurado para:
-
-- Leer desde el principio del topic (`fromBeginning: true`)
-- Procesar eventos en orden secuencial
-- Guardar cada evento en la base de datos histórica
-- Hacer commit automático de offsets
-
-## Estructura del Proyecto
+## Project Structure
 
 ```
 project_historical/
 ├── src/
+│   ├── index.js                              # Entry point
 │   ├── config/
-│   │   ├── db.js                    # Configuración de Sequelize
-│   │   └── kafkaConfig.js           # Configuración de Kafka
+│   │   ├── db.js                             # Sequelize database configuration
+│   │   └── kafkaConfig.js                    # Kafka consumer configuration
 │   ├── models/
-│   │   └── ComplaintStatusHistory.js # Modelo de historial
+│   │   └── ComplaintStatusHistory.js         # Event history data model
 │   ├── services/
-│   │   └── HistoricalConsumerService.js # Consumer de Kafka
-│   └── index.js                     # Punto de entrada
-├── .env                             # Variables de entorno
+│   │   ├── HistoricalConsumerService.js      # Kafka consumer service
+│   │   └── HistoricalConsumerService.test.js # Service tests (38 tests)
+│   ├── middlewares/
+│   │   ├── correlationId.js                  # Correlation ID middleware
+│   │   └── correlationId.test.js             # Middleware tests (6 tests)
+│   └── utils/
+│       └── logger.js                          # Winston logger configuration
+├── logs/                                      # Application logs (auto-rotated)
+├── migrations/
+│   └── add_correlation_id.sql                # Database migration
+├── ARCHITECTURE.md                            # Event Sourcing architecture docs
+├── LOGGING_TRACEABILITY.md                    # Logging and traceability guide
+├── IMPLEMENTATION_SUMMARY.md                  # Implementation summary
+├── jest.config.js                             # Jest test configuration
+├── .env.example                               # Environment variables template
 ├── .gitignore
 ├── package.json
 └── README.md
 ```
 
-## Integración con Docker
+## Authors
 
-Este servicio utiliza el mismo broker de Kafka definido en `project_email_sender`:
+- **Luis Enrique Hernández Valbuena** - [@Luisen1](https://github.com/Luisen1)
+- **Kevin Johann Jimenez Poveda** - [@KevP2051](https://github.com/KevP2051)
+- **Nicolas Danilo Muñoz Aldana** - [@NicolasDaniloMunozAldana](https://github.com/NicolasDaniloMunozAldana)
 
-```yaml
-services:
-  kafka:
-    image: confluentinc/cp-kafka:7.6.0
-    # ... configuración existente
-```
+## License
 
-## Logs
-
-El servicio implementa logging estructurado con Winston y trazabilidad mediante Correlation IDs:
-
-### Sistema de Logging
-
-- **Logs estructurados en formato JSON** con rotación diaria
-- **Correlation IDs** para trazabilidad end-to-end entre microservicios
-- **Archivos de log:**
-  - `logs/application-YYYY-MM-DD.log` - Logs generales (retención: 14 días)
-  - `logs/error-YYYY-MM-DD.log` - Solo errores (retención: 30 días)
-
-### Eventos Logueados
-
-- ✅ Conexión exitosa a Kafka
-- ✅ Eventos consumidos de Kafka con correlation ID
-- ✅ Operaciones de base de datos (INSERT)
-- ✅ Eventos de negocio (EVENT_CONSUMED, EVENT_SAVED_SUCCESS)
-- ⚠️ Advertencias de configuración
-- ❌ Errores en el procesamiento con contexto completo
-
-### Trazabilidad
-
-Todos los eventos incluyen `correlation_id` que permite rastrear una operación desde `project_complaints` hasta este consumer:
-
-```bash
-# Buscar logs por correlation ID
-grep "correlation-id-aqui" logs/application-*.log
-
-# Ver en base de datos
-SELECT * FROM historical.complaint_status_history 
-WHERE correlation_id = 'correlation-id-aqui';
-```
-
-Ver documentación completa: [LOGGING_VERIFICATION_GUIDE.md](../LOGGING_VERIFICATION_GUIDE.md)
-
-## Notas Importantes
-
-1. **Schema Histórico**: Asegúrate de que el schema `historical` existe en la base de datos
-2. **Topic de Kafka**: El topic `complaint-status-events` debe estar creado antes de iniciar el servicio
-3. **FromBeginning**: El consumer lee desde el inicio para garantizar que no se pierdan eventos
-4. **Idempotencia**: Los eventos se almacenan con timestamp único para evitar duplicados
+ISC
